@@ -1,0 +1,175 @@
+:root {
+  --bg-app: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-surface-subtle: #f1f5f9;
+  --bg-hover: #e2e8f0;
+  
+  --border-subtle: #e2e8f0;
+  --border-strong: #cbd5e1;
+  
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  --text-inverse: #ffffff;
+  
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-subtle: #eff6ff;
+  
+  --status-online: #16a34a;
+  --status-online-bg: #f0fdf4;
+  --status-offline: #94a3b8;
+  --status-danger: #dc2626;
+  --status-danger-bg: #fef2f2;
+  
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-app: #0b0f19;
+    --bg-surface: #111827;
+    --bg-surface-subtle: #1e293b;
+    --bg-hover: #2d3748;
+    
+    --border-subtle: #1f2937;
+    --border-strong: #374151;
+    
+    --text-main: #f9fafb;
+    --text-muted: #9ca3af;
+    --text-inverse: #0f172a;
+    
+    --accent: #3b82f6;
+    --accent-hover: #60a5fa;
+    --accent-subtle: #1e293b;
+    
+    --status-online: #22c55e;
+    --status-online-bg: #052e16;
+    --status-offline: #64748b;
+    --status-danger: #ef4444;
+    --status-danger-bg: #450a0a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  line-height: 1.5;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+  padding: 6px 12px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.primary {
+  background-color: var(--accent);
+  color: #ffffff;
+}
+
+button.primary:hover:not(:disabled) {
+  background-color: var(--accent-hover);
+}
+
+button.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background-color: var(--bg-surface);
+  color: var(--text-main);
+  border-color: var(--border-subtle);
+}
+
+button.secondary:hover:not(:disabled) {
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+button.danger {
+  background-color: transparent;
+  color: var(--status-danger);
+  border-color: var(--border-subtle);
+}
+
+button.danger:hover:not(:disabled) {
+  background-color: var(--status-danger-bg);
+  border-color: var(--status-danger);
+}
+
+input[type="text"] {
+  font-family: inherit;
+  font-size: 13px;
+  background-color: var(--bg-surface);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+
+input[type="text"]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+code, .mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+  font-size: 12px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-surface-subtle);
+  color: var(--text-muted);
+}
+
+.badge.online {
+  background-color: var(--status-online-bg);
+  color: var(--status-online);
+  border-color: transparent;
+}
+
+.badge.paired {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.card {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}

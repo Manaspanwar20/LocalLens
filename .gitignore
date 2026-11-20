@@ -1,0 +1,77 @@
+# ============================================================
+# Rust / Cargo
+# ============================================================
+/target/
+**/target/
+Cargo.lock          # remove this line if you want to pin deps (recommended for binaries)
+
+# ============================================================
+# Node / npm
+# ============================================================
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json   # keep if you want reproducible installs; delete this line to track it
+
+# ============================================================
+# Vite / frontend build output
+# ============================================================
+desktop/dist/
+mobile/dist/
+dist/
+
+# ============================================================
+# Tauri
+# ============================================================
+desktop/src-tauri/target/
+# WiX / NSIS bundle outputs (large installers)
+target/release/bundle/
+
+# ============================================================
+# React Native / Android
+# ============================================================
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/local.properties
+mobile/.expo/
+mobile/android/app/release/
+*.apk
+*.aab
+
+# ============================================================
+# IDE / Editor
+# ============================================================
+.vscode/settings.json
+.idea/
+*.iml
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+
+# ============================================================
+# OS
+# ============================================================
+desktop.ini
+ehthumbs.db
+
+# ============================================================
+# Secrets & local config (never commit these)
+# ============================================================
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.local
+.env.*.local
+
+# ============================================================
+# Logs
+# ============================================================
+*.log
+logs/

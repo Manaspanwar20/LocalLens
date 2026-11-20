@@ -1,0 +1,22 @@
+[package]
+name = "localshare-desktop"
+version = "0.1.0"
+description = "LocalFirstFileSharing Desktop App"
+authors = ["LocalShare"]
+edition = "2021"
+
+[lib]
+name = "localshare_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+localshare-core = { path = "../../core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
