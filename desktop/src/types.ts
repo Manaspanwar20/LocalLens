@@ -49,3 +49,21 @@ export interface PairingResult {
   peer: TrustedDevice;
   sas: SasConfirmation;
 }
+
+export interface PairRequestMessage {
+  from_device_id: string;
+  from_device_name: string;
+  from_fingerprint: string;
+}
+
+export interface PairResponseMessage {
+  accepted: boolean;
+  code?: string;
+  qr_payload?: QrPairingPayload;
+}
+
+export interface IncomingPairRequestEvent {
+  from_device_id: string;
+  from_device_name: string;
+  from_fingerprint: string;
+}

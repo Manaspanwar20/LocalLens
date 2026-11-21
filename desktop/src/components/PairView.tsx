@@ -1,24 +1,50 @@
 import React, { useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { ShieldCheck, Clock, XCircle, ArrowRight, AlertCircle, Copy, Check } from 'lucide-react';
+import {
+  ShieldCheck,
+  Clock,
+  XCircle,
+  ArrowRight,
+  AlertCircle,
+  Copy,
+  Check,
+  Camera,
+  Settings as SettingsIcon,
+  ChevronDown,
+  ChevronUp,
+} from 'lucide-react';
 import type { DiscoveredDevice, QrPairingPayload, SasConfirmation, TrustedDevice } from '../types';
 import { cancelPairing, initiatePairing, startPairing } from '../api';
 
+const isAndroid = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  return /android/i.test(navigator.userAgent);
+};
+
 interface PairViewProps {
   initialTargetDevice?: DiscoveredDevice | null;
+  initialPayload?: QrPairingPayload | null;
+  initialMode?: 'advertise' | 'connect';
   onPairingCompleted: (peer: TrustedDevice) => void;
+  onCancel?: () => void;
 }
 
 export const PairView: React.FC<PairViewProps> = ({
   initialTargetDevice,
+  initialPayload,
+  initialMode,
   onPairingCompleted,
+  onCancel,
 }) => {
-  const [mode, setMode] = useState<'advertise' | 'connect'>(
-    initialTargetDevice ? 'connect' : 'advertise'
-  );
+  const [mode, setMode] = useState<'advertise' | 'connect'>(() => {
+    if (initialMode) return initialMode;
+    if (initialPayload) return 'advertise';
+    if (initialTargetDevice) return 'connect';
+    return isAndroid() ? 'connect' : 'advertise';
+  });
 
   // Advertise state
-  const [payload, setPayload] = useState<QrPairingPayload | null>(null);
+  const [payload, setPayload] = useState<QrPairingPayload | null>(initialPayload || null);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(120);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
@@ -28,11 +54,13 @@ export const PairView: React.FC<PairViewProps> = ({
     initialTargetDevice?.addresses[0] || ''
   );
   const [targetPort, setTargetPort] = useState<string>(
-    initialTargetDevice ? String(initialTargetDevice.port) : '52480'
+    initialTargetDevice ? String(initialTargetDevice.port) : ''
   );
-  const [authMethod, setAuthMethod] = useState<'code' | 'qr'>('code');
   const [secretOrCode, setSecretOrCode] = useState<string>('');
+  const [showManualAddress, setShowManualAddress] = useState<boolean>(!initialTargetDevice);
   const [isPairingConnecting, setIsPairingConnecting] = useState<boolean>(false);
+  const [isScanning, setIsScanning] = useState<boolean>(false);
+  const [permissionDenied, setPermissionDenied] = useState<boolean>(false);
 
   // Confirmation state
   const [sasConfirmation, setSasConfirmation] = useState<{
@@ -56,11 +84,29 @@ export const PairView: React.FC<PairViewProps> = ({
   };
 
   useEffect(() => {
-    if (mode === 'advertise') {
+    if (initialPayload) {
+      setPayload(initialPayload);
+      setSecondsRemaining(120);
+      setMode('advertise');
+    }
+  }, [initialPayload]);
+
+  useEffect(() => {
+    if (initialTargetDevice) {
+      setTargetIp(initialTargetDevice.addresses[0] || '');
+      setTargetPort(String(initialTargetDevice.port || ''));
+      setMode('connect');
+    }
+  }, [initialTargetDevice]);
+
+  useEffect(() => {
+    if (mode === 'advertise' && !payload) {
       startHostingPairing();
     }
     return () => {
-      cancelPairing().catch(() => {});
+      if (mode === 'advertise') {
+        cancelPairing().catch(() => {});
+      }
     };
   }, [mode]);
 
@@ -83,32 +129,155 @@ export const PairView: React.FC<PairViewProps> = ({
     await cancelPairing();
     setPayload(null);
     setSecondsRemaining(0);
+    if (onCancel) onCancel();
   };
 
-  const handleConnectPeer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!targetIp || !targetPort || !secretOrCode) {
-      setErrorMsg('Please fill in IP address, port, and code or secret.');
-      return;
+  // ── Open App Settings for camera permission ───────────────────────────
+  const handleOpenSettings = async () => {
+    try {
+      const { openAppSettings } = await import('@tauri-apps/plugin-barcode-scanner');
+      await openAppSettings();
+    } catch (e) {
+      console.error('Failed to open app settings:', e);
     }
-    setIsPairingConnecting(true);
+  };
+
+  // ── QR Scanner Handler (Mobile only) ──────────────────────────────────
+  const handleScanQr = async () => {
+    setIsScanning(true);
     setErrorMsg('');
+    setPermissionDenied(false);
 
     try {
-      const peerAddr = `${targetIp.trim()}:${targetPort.trim()}`;
-      const res = await initiatePairing(
-        peerAddr,
-        authMethod,
-        secretOrCode.replace(/\s+/g, '')
+      const { scan, checkPermissions, requestPermissions, Format } = await import(
+        '@tauri-apps/plugin-barcode-scanner'
       );
+
+      // Check and request camera permission
+      let perm = await checkPermissions();
+      if (perm !== 'granted') {
+        perm = await requestPermissions();
+      }
+
+      if (perm !== 'granted') {
+        setPermissionDenied(true);
+        setErrorMsg('Camera permission is required to scan QR codes.');
+        setIsScanning(false);
+        return;
+      }
+
+      // Open camera scanner
+      const result = await scan({
+        cameraDirection: 'back',
+        formats: [Format.QRCode],
+      });
+
+      if (!result || !result.content) {
+        setIsScanning(false);
+        return;
+      }
+
+      let parsed: QrPairingPayload;
+      try {
+        parsed = JSON.parse(result.content) as QrPairingPayload;
+      } catch {
+        setErrorMsg('Scanned QR code is not a valid LocalShare pairing code.');
+        setIsScanning(false);
+        return;
+      }
+
+      if (!parsed.addrs || parsed.addrs.length === 0 || !parsed.port || !parsed.secret) {
+        setErrorMsg('QR code is missing connection details.');
+        setIsScanning(false);
+        return;
+      }
+
+      // Try connecting to the peer using addresses from the QR payload
+      setIsPairingConnecting(true);
+      let lastErr: any = null;
+      let successResult: { peer: TrustedDevice; sas: SasConfirmation } | null = null;
+
+      for (const ip of parsed.addrs) {
+        try {
+          const peerAddr = `${ip}:${parsed.port}`;
+          const res = await initiatePairing(peerAddr, 'qr', parsed.secret);
+          successResult = res;
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+
+      if (successResult) {
+        setSasConfirmation(successResult);
+        onPairingCompleted(successResult.peer);
+      } else {
+        const msg = typeof lastErr === 'string' ? lastErr : lastErr?.message || 'Could not connect to peer';
+        setErrorMsg(`Connection failed: ${msg}. Make sure both devices are on the same Wi-Fi.`);
+      }
+    } catch (err: any) {
+      console.error('Scan error:', err);
+      const msg = typeof err === 'string' ? err : err?.message || 'Scanner failed';
+      if (/permission/i.test(msg)) {
+        setPermissionDenied(true);
+      }
+      setErrorMsg(msg);
+    } finally {
+      setIsScanning(false);
+      setIsPairingConnecting(false);
+    }
+  };
+
+  // ── Manual Connection (6-Digit Code) ──────────────────────────────────
+  const handleConnectPeer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+
+    let ip = targetIp.trim();
+    let port = targetPort.trim();
+    const code = secretOrCode.trim().replace(/\s+/g, '');
+
+    // Strip http:// or https:// if pasted
+    ip = ip.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+
+    // Parse IP:port if together
+    if (ip.includes(':')) {
+      const parts = ip.split(':');
+      ip = parts[0].trim();
+      port = parts[1].trim();
+    }
+
+    if (!ip) {
+      setErrorMsg('No IP address found. Please select a device from the Nearby list or enter IP manually.');
+      return;
+    }
+
+    if (!port || isNaN(Number(port))) {
+      setErrorMsg('Invalid port number.');
+      return;
+    }
+
+    if (!code || code.length < 4) {
+      setErrorMsg('Please enter the 6-digit code shown on the other device.');
+      return;
+    }
+
+    setIsPairingConnecting(true);
+
+    try {
+      const peerAddr = `${ip}:${port}`;
+      const res = await initiatePairing(peerAddr, 'code', code);
       setSasConfirmation(res);
       onPairingCompleted(res.peer);
     } catch (err: any) {
-      setErrorMsg(
-        typeof err === 'string'
-          ? err
-          : 'Pairing failed. Check secret code or network reachability.'
-      );
+      const rawMsg = typeof err === 'string' ? err : err?.message || 'Pairing failed';
+      if (/failed to lookup address|no information associated/i.test(rawMsg)) {
+        setErrorMsg(`Could not reach "${ip}". Make sure both devices are on the same Wi-Fi.`);
+      } else if (/connection refused/i.test(rawMsg)) {
+        setErrorMsg(`Connection refused. Ensure the other device accepted pairing and is in pairing mode.`);
+      } else {
+        setErrorMsg(`Pairing failed: ${rawMsg}`);
+      }
     } finally {
       setIsPairingConnecting(false);
     }
@@ -128,84 +297,86 @@ export const PairView: React.FC<PairViewProps> = ({
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
-  // If pairing succeeded, show SAS confirmation dialog
+  // ── SAS Confirmation Screen ───────────────────────────────────────────
   if (sasConfirmation) {
     return (
-      <div style={{ maxWidth: '580px', margin: '40px auto', padding: '0 20px' }}>
-        <div className="card" style={{ padding: '32px' }}>
+      <div className="content-container" style={{ maxWidth: '580px', margin: '20px auto', padding: '0 16px', width: '100%' }}>
+        <div className="card" style={{ padding: '24px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--status-online)', marginBottom: '16px' }}>
             <ShieldCheck size={28} />
             <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-main)' }}>
-              Pairing Succeeded
+              Pairing Succeeded!
             </h2>
           </div>
 
-          <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '24px', lineHeight: 1.6 }}>
-            Both devices have proven possession of the pairing secret and exchanged long-term identity keys. To prevent active man-in-the-middle attacks on the local Wi-Fi, verify that the following authentication string matches on both screens:
+          <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '20px', lineHeight: 1.6 }}>
+            Both devices verified the cryptographic handshake. Compare this authentication string with your other device:
           </p>
 
-          {/* SAS Code Display */}
-          <div style={{
-            backgroundColor: 'var(--bg-surface-subtle)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 'var(--radius-md)',
-            padding: '24px',
-            textAlign: 'center',
-            marginBottom: '24px',
-          }}>
+          <div
+            style={{
+              backgroundColor: 'var(--bg-surface-subtle)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-md)',
+              padding: '20px',
+              textAlign: 'center',
+              marginBottom: '20px',
+            }}
+          >
             <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--text-muted)', marginBottom: '8px' }}>
               Short Authentication String (SAS)
             </div>
-
-            <div className="mono" style={{ fontSize: '32px', fontWeight: 700, letterSpacing: '4px', marginBottom: '12px' }}>
+            <div className="mono" style={{ fontSize: '30px', fontWeight: 700, letterSpacing: '4px', marginBottom: '10px' }}>
               {sasConfirmation.sas.numeric}
             </div>
-
-            <div style={{ fontSize: '28px', display: 'flex', justifyContent: 'center', gap: '12px' }}>
+            <div style={{ fontSize: '26px', display: 'flex', justifyContent: 'center', gap: '12px' }}>
               {sasConfirmation.sas.emoji.map((em, idx) => (
                 <span key={idx}>{em}</span>
               ))}
             </div>
           </div>
 
-          <div style={{
-            fontSize: '12px',
-            color: 'var(--text-muted)',
-            marginBottom: '24px',
-            padding: '12px',
-            backgroundColor: 'var(--bg-app)',
-            borderRadius: 'var(--radius-sm)',
-          }}>
-            <div><strong>Paired Device:</strong> {sasConfirmation.peer.device_name}</div>
+          <div
+            style={{
+              fontSize: '12px',
+              color: 'var(--text-muted)',
+              marginBottom: '20px',
+              padding: '12px',
+              backgroundColor: 'var(--bg-app)',
+              borderRadius: 'var(--radius-sm)',
+              wordBreak: 'break-all',
+            }}
+          >
+            <div><strong>Device:</strong> {sasConfirmation.peer.device_name}</div>
             <div className="mono" style={{ marginTop: '4px' }}>
-              <strong>Device ID:</strong> {sasConfirmation.peer.device_id}
-            </div>
-            <div className="mono" style={{ marginTop: '2px' }}>
-              <strong>Key Fingerprint:</strong> {sasConfirmation.peer.fingerprint}
+              <strong>Fingerprint:</strong> {sasConfirmation.peer.fingerprint}
             </div>
           </div>
 
           <button
             className="primary"
-            style={{ width: '100%', padding: '10px' }}
+            style={{ width: '100%', padding: '12px' }}
             onClick={() => setSasConfirmation(null)}
           >
-            Confirmed — Device is Trusted
+            Done — Device is Trusted
           </button>
         </div>
       </div>
     );
   }
 
+  // ── Main Pair View ────────────────────────────────────────────────────
   return (
-    <div style={{ maxWidth: '680px', margin: '24px auto', padding: '0 20px' }}>
+    <div className="content-container" style={{ maxWidth: '680px', margin: '20px auto', padding: '0 16px', width: '100%' }}>
       {/* Mode Switcher */}
-      <div style={{
-        display: 'flex',
-        borderBottom: '1px solid var(--border-subtle)',
-        marginBottom: '24px',
-        gap: '16px',
-      }}>
+      <div
+        style={{
+          display: 'flex',
+          borderBottom: '1px solid var(--border-subtle)',
+          marginBottom: '20px',
+          gap: '12px',
+        }}
+      >
         <button
           onClick={() => setMode('advertise')}
           style={{
@@ -215,10 +386,10 @@ export const PairView: React.FC<PairViewProps> = ({
             color: mode === 'advertise' ? 'var(--text-main)' : 'var(--text-muted)',
             fontWeight: 600,
             borderRadius: 0,
-            padding: '10px 4px',
+            padding: '10px 8px',
           }}
         >
-          Show QR / Pairing Code
+          Show QR & Code
         </button>
 
         <button
@@ -230,51 +401,79 @@ export const PairView: React.FC<PairViewProps> = ({
             color: mode === 'connect' ? 'var(--text-main)' : 'var(--text-muted)',
             fontWeight: 600,
             borderRadius: 0,
-            padding: '10px 4px',
+            padding: '10px 8px',
           }}
         >
-          Enter Peer Code
+          {isAndroid() ? 'Scan / Enter Code' : 'Enter 6-Digit Code'}
         </button>
       </div>
 
       {errorMsg && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          padding: '10px 14px',
-          backgroundColor: 'var(--status-danger-bg)',
-          color: 'var(--status-danger)',
-          borderRadius: 'var(--radius-sm)',
-          fontSize: '13px',
-          marginBottom: '20px',
-        }}>
-          <AlertCircle size={16} />
-          <span>{errorMsg}</span>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            padding: '12px 14px',
+            backgroundColor: 'var(--status-danger-bg)',
+            color: 'var(--status-danger)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: '13px',
+            marginBottom: '16px',
+            lineHeight: 1.5,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+            <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+            <span>{errorMsg}</span>
+          </div>
+
+          {permissionDenied && (
+            <button
+              className="secondary"
+              onClick={handleOpenSettings}
+              style={{
+                alignSelf: 'flex-start',
+                fontSize: '12px',
+                padding: '4px 10px',
+                marginTop: '4px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+            >
+              <SettingsIcon size={13} />
+              <span>Open Android Settings</span>
+            </button>
+          )}
         </div>
       )}
 
       {mode === 'advertise' ? (
-        <div className="card" style={{ padding: '28px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
+        // ── Show QR & 6-Digit Code (Receiver / Host) ───────────────────
+        <div className="card" style={{ padding: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
             <div>
               <h3 style={{ fontSize: '16px', fontWeight: 600 }}>Pairing Mode Active</h3>
               <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '2px' }}>
-                Scan this QR code with the LocalShare mobile app, or enter the 6-digit numeric fallback code.
+                {isAndroid()
+                  ? 'Enter this 6-digit code on your laptop to pair.'
+                  : 'Scan this QR code with your mobile app, or enter the 6-digit code.'}
               </p>
             </div>
-
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              fontSize: '13px',
-              fontWeight: 600,
-              color: secondsRemaining < 30 ? 'var(--status-danger)' : 'var(--text-main)',
-              backgroundColor: 'var(--bg-surface-subtle)',
-              padding: '4px 10px',
-              borderRadius: 'var(--radius-sm)',
-            }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '13px',
+                fontWeight: 600,
+                color: secondsRemaining < 30 ? 'var(--status-danger)' : 'var(--text-main)',
+                backgroundColor: 'var(--bg-surface-subtle)',
+                padding: '4px 10px',
+                borderRadius: 'var(--radius-sm)',
+              }}
+            >
               <Clock size={14} />
               <span>{formatTimer(secondsRemaining)}</span>
             </div>
@@ -285,54 +484,48 @@ export const PairView: React.FC<PairViewProps> = ({
               <XCircle size={36} color="var(--status-offline)" style={{ margin: '0 auto 12px auto' }} />
               <h4 style={{ fontSize: '15px', fontWeight: 500, marginBottom: '6px' }}>Pairing code expired</h4>
               <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '16px' }}>
-                Pairing secrets expire in 2 minutes for security. Generate a new code to continue.
+                Pairing codes expire after 2 minutes for security.
               </p>
               <button className="primary" onClick={startHostingPairing} disabled={isLoading}>
                 Generate New Code
               </button>
             </div>
           ) : payload ? (
-            <div style={{ display: 'flex', gap: '32px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
               {/* QR Code */}
-              <div style={{
-                padding: '16px',
-                backgroundColor: '#ffffff',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--border-subtle)',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-                display: 'inline-block',
-              }}>
-                <QRCodeSVG
-                  value={JSON.stringify(payload)}
-                  size={190}
-                  level="M"
-                  includeMargin={false}
-                />
+              <div
+                style={{
+                  padding: '16px',
+                  backgroundColor: '#ffffff',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--border-subtle)',
+                  display: 'inline-block',
+                }}
+              >
+                <QRCodeSVG value={JSON.stringify(payload)} size={200} level="M" includeMargin={false} />
               </div>
 
-              {/* Code Info & Details */}
-              <div style={{ flex: 1 }}>
-                <div style={{ marginBottom: '16px' }}>
-                  <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                    6-Digit Fallback Code
+              {/* Code */}
+              <div style={{ flex: '1 1 240px', minWidth: '220px', textAlign: 'center' }}>
+                <div style={{ marginBottom: '20px' }}>
+                  <div style={{ fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                    6-Digit Verification Code
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <span className="mono" style={{ fontSize: '26px', fontWeight: 700, letterSpacing: '3px' }}>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: '10px', backgroundColor: 'var(--bg-surface-subtle)', padding: '8px 16px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                    <span className="mono" style={{ fontSize: '32px', fontWeight: 700, letterSpacing: '4px', color: 'var(--accent)' }}>
                       {payload.code.slice(0, 3)} {payload.code.slice(3, 6)}
                     </span>
-                    <button className="secondary" onClick={copyCode} style={{ padding: '4px 8px' }}>
-                      {copiedCode ? <Check size={14} color="var(--status-online)" /> : <Copy size={14} />}
+                    <button className="secondary" onClick={copyCode} style={{ padding: '6px 8px' }} title="Copy Code">
+                      {copiedCode ? <Check size={16} color="var(--status-online)" /> : <Copy size={16} />}
                     </button>
                   </div>
                 </div>
 
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '20px' }}>
-                  <div><strong>IP:</strong> {payload.addrs.join(', ')}</div>
-                  <div><strong>Port:</strong> {payload.port}</div>
-                  <div><strong>Security:</strong> 256-bit Noise PSK, single-use</div>
+                <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '20px', lineHeight: 1.5 }}>
+                  Waiting for other device to complete pairing...
                 </div>
 
-                <button className="danger" onClick={handleCancel}>
+                <button className="danger" onClick={handleCancel} style={{ margin: '0 auto' }}>
                   Cancel Pairing
                 </button>
               </div>
@@ -344,91 +537,154 @@ export const PairView: React.FC<PairViewProps> = ({
           )}
         </div>
       ) : (
-        /* Connect to Peer Tab */
-        <div className="card" style={{ padding: '28px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '4px' }}>
-            Pair with Another Device
-          </h3>
-          <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '20px' }}>
-            Enter the peer device's IP address and 6-digit pairing code shown on their screen.
-          </p>
+        // ── Connect Mode (Initiator) ───────────────────────────────────
+        <div className="card" style={{ padding: '24px' }}>
+          {initialTargetDevice && (
+            <div
+              style={{
+                backgroundColor: 'var(--accent-subtle)',
+                border: '1px solid var(--accent)',
+                borderRadius: '8px',
+                padding: '12px 16px',
+                marginBottom: '20px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+              }}
+            >
+              <div style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: 'var(--accent)',
+              }} />
+              <span style={{ fontSize: '14px', fontWeight: 600 }}>
+                Pairing with {initialTargetDevice.device_name}
+              </span>
+            </div>
+          )}
 
-          <form onSubmit={handleConnectPeer}>
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '12px', marginBottom: '14px' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '6px' }}>
-                  Peer IP Address
-                </label>
-                <input
-                  type="text"
-                  placeholder="192.168.1.100"
-                  value={targetIp}
-                  onChange={(e) => setTargetIp(e.target.value)}
-                  style={{ width: '100%' }}
-                  required
-                />
-              </div>
+          {/* Android camera QR scanner button (Mobile only) */}
+          {isAndroid() && (
+            <div style={{ marginBottom: '20px' }}>
+              <button
+                className="primary"
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontSize: '15px',
+                  fontWeight: 600,
+                  borderRadius: '8px',
+                }}
+                onClick={handleScanQr}
+                disabled={isScanning || isPairingConnecting}
+              >
+                <Camera size={20} />
+                <span>{isScanning ? 'Opening Camera...' : 'Scan QR Code on Laptop'}</span>
+              </button>
 
-              <div>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '6px' }}>
-                  Port
-                </label>
-                <input
-                  type="text"
-                  placeholder="52480"
-                  value={targetPort}
-                  onChange={(e) => setTargetPort(e.target.value)}
-                  style={{ width: '100%' }}
-                  required
-                />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '20px 0 16px 0' }}>
+                <div style={{ flex: 1, height: '1px', backgroundColor: 'var(--border-subtle)' }} />
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: 500 }}>
+                  or enter 6-digit code
+                </span>
+                <div style={{ flex: 1, height: '1px', backgroundColor: 'var(--border-subtle)' }} />
               </div>
             </div>
+          )}
 
-            <div style={{ marginBottom: '20px' }}>
-              <div style={{ display: 'flex', gap: '12px', marginBottom: '8px' }}>
-                <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="authMethod"
-                    checked={authMethod === 'code'}
-                    onChange={() => setAuthMethod('code')}
-                  />
-                  <span>6-Digit Code</span>
-                </label>
-                <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="authMethod"
-                    checked={authMethod === 'qr'}
-                    onChange={() => setAuthMethod('qr')}
-                  />
-                  <span>256-bit Hex Secret</span>
-                </label>
-              </div>
-
+          {/* Code input form */}
+          <form onSubmit={handleConnectPeer}>
+            <div style={{ marginBottom: '20px', textAlign: 'center' }}>
+              <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
+                Enter the 6-Digit Code
+              </label>
               <input
                 type="text"
-                placeholder={authMethod === 'code' ? 'e.g. 749 102' : '64-character hex secret'}
+                placeholder="• • • • • •"
+                maxLength={7}
+                autoFocus
                 value={secretOrCode}
                 onChange={(e) => setSecretOrCode(e.target.value)}
-                style={{ width: '100%', fontSize: '14px' }}
+                style={{
+                  width: '100%',
+                  maxWidth: '280px',
+                  padding: '12px',
+                  fontSize: '26px',
+                  letterSpacing: '6px',
+                  textAlign: 'center',
+                  fontWeight: 700,
+                  margin: '0 auto',
+                  borderRadius: '8px',
+                }}
                 required
               />
+              <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '6px' }}>
+                Look at the 6-digit code displayed on the other device.
+              </p>
             </div>
+
+            {/* Collapsible manual IP/Port for edge cases */}
+            {!initialTargetDevice && (
+              <div style={{ marginBottom: '16px' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowManualAddress(!showManualAddress)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-muted)',
+                    fontSize: '12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    margin: '0 auto',
+                    padding: '4px 8px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Manual IP & Port</span>
+                  {showManualAddress ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </button>
+
+                {showManualAddress && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '8px', marginTop: '8px' }}>
+                    <input
+                      type="text"
+                      placeholder="IP Address (e.g. 192.168.1.250)"
+                      value={targetIp}
+                      onChange={(e) => setTargetIp(e.target.value)}
+                      style={{ padding: '8px', fontSize: '13px' }}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Port"
+                      value={targetPort}
+                      onChange={(e) => setTargetPort(e.target.value)}
+                      style={{ padding: '8px', fontSize: '13px' }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
 
             <button
               type="submit"
               className="primary"
-              disabled={isPairingConnecting}
-              style={{ width: '100%', padding: '10px' }}
+              disabled={isPairingConnecting || !secretOrCode.trim()}
+              style={{ width: '100%', padding: '12px', fontSize: '15px', fontWeight: 600, borderRadius: '8px' }}
             >
               {isPairingConnecting ? (
-                'Running Authenticated Key Exchange...'
+                'Pairing & Verifying...'
               ) : (
-                <>
-                  <span>Pair with Device</span>
-                  <ArrowRight size={15} />
-                </>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  <span>Pair Device</span>
+                  <ArrowRight size={16} />
+                </div>
               )}
             </button>
           </form>

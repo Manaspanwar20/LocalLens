@@ -27,6 +27,10 @@ dist/
 # Tauri
 # ============================================================
 desktop/src-tauri/target/
+desktop/src-tauri/gen/android/.gradle/
+desktop/src-tauri/gen/android/app/build/
+desktop/src-tauri/gen/android/buildSrc/.gradle/
+desktop/src-tauri/gen/android/buildSrc/build/
 # WiX / NSIS bundle outputs (large installers)
 target/release/bundle/
 

@@ -10,10 +10,26 @@ pub const PROTOCOL_MAGIC: &[u8; 4] = b"LSHR";
 // Message Types
 pub const MSG_TYPE_PAIR_HANDSHAKE: u8 = 0x01;
 pub const MSG_TYPE_PAIR_INFO: u8 = 0x02;
+pub const MSG_TYPE_PAIR_REQUEST: u8 = 0x03;
+pub const MSG_TYPE_PAIR_RESPONSE: u8 = 0x04;
 pub const MSG_TYPE_SESSION_HANDSHAKE: u8 = 0x10;
 pub const MSG_TYPE_SESSION_APP: u8 = 0x11;
 
 pub const MAX_FRAME_SIZE: usize = 65535;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairRequestMessage {
+    pub from_device_id: String,
+    pub from_device_name: String,
+    pub from_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairResponseMessage {
+    pub accepted: bool,
+    pub code: Option<String>,
+    pub qr_payload: Option<crate::pairing::QrPairingPayload>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairingExchangeInfo {
@@ -30,6 +46,7 @@ pub enum AppMessage {
     Pong { timestamp: u64 },
     Hello { device_id: String, device_name: String },
     Disconnect { reason: String },
+    RevokeTrust { from_device_id: String },
 }
 
 pub async fn write_frame<W>(

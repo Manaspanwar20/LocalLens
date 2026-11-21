@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Wifi, Radio, Activity, Link2, CheckCircle2, AlertCircle } from 'lucide-react';
-import type { DiscoveredDevice, TrustedDevice } from '../types';
-import { pingPeer } from '../api';
+import { Wifi, Radio, Activity, Link2, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import type { DiscoveredDevice, PairResponseMessage, TrustedDevice } from '../types';
+import { pingPeer, sendPairRequest } from '../api';
 
 interface HomeViewProps {
   devices: DiscoveredDevice[];
@@ -9,7 +9,7 @@ interface HomeViewProps {
   isScanning: boolean;
   scanCountdown: number;
   onConnect: () => void;
-  onStartPairWith: (device: DiscoveredDevice) => void;
+  onStartPairWith: (device: DiscoveredDevice, pairResponse?: PairResponseMessage) => void;
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({
@@ -23,6 +23,10 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const [pingLatencies, setPingLatencies] = useState<Record<string, number>>({});
   const [pinging, setPinging] = useState<Record<string, boolean>>({});
   const [pingErrors, setPingErrors] = useState<Record<string, string>>({});
+
+  // Pairing request state
+  const [pairingWithId, setPairingWithId] = useState<string | null>(null);
+  const [pairError, setPairError] = useState<string | null>(null);
 
   const handlePing = async (device: DiscoveredDevice) => {
     if (device.addresses.length === 0) return;
@@ -43,19 +47,46 @@ export const HomeView: React.FC<HomeViewProps> = ({
     }
   };
 
+  const handlePairClick = async (device: DiscoveredDevice) => {
+    if (device.addresses.length === 0) {
+      setPairError(`No reachable network address for ${device.device_name}`);
+      return;
+    }
+
+    setPairingWithId(device.device_id);
+    setPairError(null);
+
+    const peerAddr = `${device.addresses[0]}:${device.port}`;
+    try {
+      const response = await sendPairRequest(peerAddr);
+      if (response.accepted) {
+        onStartPairWith(device, response);
+      } else {
+        setPairError(`${device.device_name} declined the pairing request.`);
+      }
+    } catch (err: any) {
+      const msg = typeof err === 'string' ? err : err?.message || 'Could not send pairing request';
+      setPairError(msg);
+    } finally {
+      setPairingWithId(null);
+    }
+  };
+
   return (
-    <div style={{ maxWidth: '860px', margin: '0 auto', padding: '24px 20px' }}>
+    <div className="content-container" style={{ maxWidth: '860px', margin: '0 auto', padding: '24px 20px', width: '100%' }}>
       {/* Header bar */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
         marginBottom: '20px',
+        flexWrap: 'wrap',
+        gap: '12px',
       }}>
         <div>
           <h2 style={{ fontSize: '18px', fontWeight: 600 }}>Nearby Devices</h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '2px' }}>
-            Discovered over local Wi-Fi via mDNS (<code className="mono">_localshare._tcp</code>)
+            Discovered over local Wi-Fi
           </p>
         </div>
 
@@ -77,6 +108,44 @@ export const HomeView: React.FC<HomeViewProps> = ({
         )}
       </div>
 
+      {/* Global Pair Error banner */}
+      {pairError && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '8px',
+            padding: '12px 14px',
+            backgroundColor: 'var(--status-danger-bg)',
+            color: 'var(--status-danger)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: '13px',
+            marginBottom: '16px',
+            border: '1px solid rgba(220, 38, 38, 0.2)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <AlertCircle size={16} style={{ flexShrink: 0 }} />
+            <span>{pairError}</span>
+          </div>
+          <button
+            onClick={() => setPairError(null)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--status-danger)',
+              cursor: 'pointer',
+              padding: '2px 6px',
+              fontSize: '12px',
+              fontWeight: 600,
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Device List */}
       {devices.length === 0 ? (
         <div className="card" style={{
@@ -95,7 +164,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
             margin: '0 auto 16px auto',
             lineHeight: 1.6,
           }}>
-            Click "Connect" above to scan for nearby peers running LocalShare. Make sure both devices are connected to the same Wi-Fi router and Windows Firewall has allowed the application.
+            Click "Scan Wi-Fi" to discover nearby devices running LocalShare. Make sure both devices are on the same Wi-Fi network.
           </p>
           <button className="primary" onClick={onConnect} disabled={isScanning}>
             {isScanning ? 'Scanning in progress...' : 'Start 10s Wi-Fi Scan'}
@@ -108,7 +177,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
             const latency = pingLatencies[device.device_id];
             const isPinging = pinging[device.device_id];
             const pingErr = pingErrors[device.device_id];
-            const primaryAddr = device.addresses[0] || 'Unknown IP';
+            const isPairingThis = pairingWithId === device.device_id;
 
             return (
               <div
@@ -118,26 +187,48 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  padding: '14px 18px',
+                  padding: '12px 16px',
+                  gap: '12px',
+                  flexWrap: 'wrap',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  minWidth: 0,
+                  flex: '1 1 200px',
+                }}>
                   <div style={{
-                    width: '36px',
-                    height: '36px',
-                    borderRadius: 'var(--radius-sm)',
+                    width: '38px',
+                    height: '38px',
+                    borderRadius: '8px',
                     backgroundColor: 'var(--bg-surface-subtle)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     border: '1px solid var(--border-subtle)',
+                    flexShrink: 0,
                   }}>
-                    <Wifi size={18} color="var(--text-muted)" />
+                    <Wifi size={18} color="var(--accent)" />
                   </div>
 
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ fontWeight: 600, fontSize: '14px' }}>{device.device_name}</span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      flexWrap: 'wrap',
+                    }}>
+                      <span style={{
+                        fontWeight: 600,
+                        fontSize: '14px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {device.device_name}
+                      </span>
                       
                       {isPaired ? (
                         <span className="badge online">
@@ -156,24 +247,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
                       )}
                     </div>
 
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '12px',
-                      marginTop: '4px',
-                      color: 'var(--text-muted)',
-                      fontSize: '12px',
-                    }}>
-                      <span className="mono">{primaryAddr}:{device.port}</span>
-                      <span>•</span>
-                      <span className="mono">FP: {device.fingerprint.slice(0, 10)}...</span>
-                      <span>•</span>
-                      <span>v{device.protocol_version}</span>
-                    </div>
-
                     {latency !== undefined && (
                       <div style={{
-                        marginTop: '6px',
+                        marginTop: '4px',
                         fontSize: '12px',
                         color: 'var(--status-online)',
                         display: 'flex',
@@ -188,7 +264,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
                     {pingErr && (
                       <div style={{
-                        marginTop: '6px',
+                        marginTop: '4px',
                         fontSize: '12px',
                         color: 'var(--status-danger)',
                         display: 'flex',
@@ -202,7 +278,13 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  flexShrink: 0,
+                  marginLeft: 'auto',
+                }}>
                   {isPaired ? (
                     <button
                       className="secondary"
@@ -216,10 +298,21 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   ) : (
                     <button
                       className="primary"
-                      onClick={() => onStartPairWith(device)}
+                      onClick={() => handlePairClick(device)}
+                      disabled={isPairingThis || pairingWithId !== null}
+                      style={{ minWidth: '85px' }}
                     >
-                      <Link2 size={14} />
-                      <span>Pair</span>
+                      {isPairingThis ? (
+                        <>
+                          <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                          <span>Requesting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Link2 size={14} />
+                          <span>Pair</span>
+                        </>
+                      )}
                     </button>
                   )}
                 </div>

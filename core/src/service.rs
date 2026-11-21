@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -8,7 +9,10 @@ use crate::discovery::{DiscoveredDevice, DiscoveryManager};
 use crate::error::CoreError;
 use crate::identity::DeviceIdentity;
 use crate::pairing::{PairingAuthMode, PairingManager, QrPairingPayload, SasConfirmation};
-use crate::protocol::{read_frame, AppMessage, MSG_TYPE_PAIR_HANDSHAKE, MSG_TYPE_SESSION_HANDSHAKE};
+use crate::protocol::{
+    read_frame, write_frame, AppMessage, MSG_TYPE_PAIR_HANDSHAKE, MSG_TYPE_PAIR_REQUEST,
+    MSG_TYPE_PAIR_RESPONSE, MSG_TYPE_SESSION_HANDSHAKE, PairRequestMessage, PairResponseMessage,
+};
 use crate::secure_store::SecureStore;
 use crate::session::SessionManager;
 use crate::trust::{TrustedDevice, TrustStore};
@@ -34,6 +38,12 @@ pub enum ServiceEvent {
         device_id: String,
         latency_ms: u64,
     },
+    TrustStoreUpdated(Vec<TrustedDevice>),
+    IncomingPairRequest {
+        from_device_id: String,
+        from_device_name: String,
+        from_fingerprint: String,
+    },
 }
 
 pub struct AppService {
@@ -45,6 +55,7 @@ pub struct AppService {
     pub session: Arc<SessionManager>,
     pub local_port: RwLock<u16>,
     pub event_tx: broadcast::Sender<ServiceEvent>,
+    pub pending_pair_requests: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Option<QrPairingPayload>>>>>,
 }
 
 impl AppService {
@@ -60,7 +71,9 @@ impl AppService {
         let trust_store = Arc::new(TrustStore::new(secure_store.clone()));
         trust_store.load_or_init().await?;
 
-        let discovery = Arc::new(DiscoveryManager::new()?);
+        let discovery = Arc::new(DiscoveryManager::new().await?);
+        discovery.set_trust_store(trust_store.clone());
+
         let pairing = Arc::new(PairingManager::new());
         let session = Arc::new(SessionManager::new(identity, trust_store.clone()));
 
@@ -69,12 +82,37 @@ impl AppService {
         let service = Arc::new(Self {
             identity: identity_ref,
             secure_store,
-            trust_store,
-            discovery,
+            trust_store: trust_store.clone(),
+            discovery: discovery.clone(),
             pairing,
-            session,
+            session: session.clone(),
             local_port: RwLock::new(0),
-            event_tx,
+            event_tx: event_tx.clone(),
+            pending_pair_requests: Arc::new(RwLock::new(HashMap::new())),
+        });
+
+        // Background live heartbeat / peer presence sync loop (every 3 seconds)
+        let svc_weak = Arc::downgrade(&service);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                if let Some(svc) = svc_weak.upgrade() {
+                    let port = *svc.local_port.read().await;
+                    if port > 0 {
+                        let id = svc.identity.read().await;
+                        let is_pairing = svc.pairing.is_in_pairing_mode().await;
+                        let _ = svc.discovery.start_advertising(
+                            &id.device_id,
+                            &id.device_name,
+                            port,
+                            is_pairing,
+                            &id.fingerprint,
+                        ).await;
+                    }
+                } else {
+                    break;
+                }
+            }
         });
 
         Ok(service)
@@ -167,6 +205,8 @@ impl AppService {
                             peer,
                             sas,
                         });
+                        let all_trusted = self.trust_store.list_devices().await;
+                        let _ = self.event_tx.send(ServiceEvent::TrustStoreUpdated(all_trusted));
                     }
                     Err(e) => {
                         warn!("Pairing failed for {}: {}", peer_addr, e);
@@ -185,7 +225,7 @@ impl AppService {
                     Ok((mut secure_session, mut shutdown_rx)) => {
                         info!("Encrypted session established with {}", secure_session.peer_device.device_name);
 
-                        // Loop handling session messages (Ping, Pong, etc.)
+                        // Loop handling session messages (Ping, Pong, Revoke, etc.)
                         loop {
                             tokio::select! {
                                 _ = shutdown_rx.recv() => {
@@ -199,6 +239,14 @@ impl AppService {
                                                 warn!("Failed to send pong: {}", e);
                                                 break;
                                             }
+                                        }
+                                        Ok(AppMessage::RevokeTrust { from_device_id }) => {
+                                            info!("Received RevokeTrust notification from peer {}", from_device_id);
+                                            let _ = self.trust_store.revoke_device(&from_device_id).await;
+                                            self.session.close_session(&from_device_id).await;
+                                            let all_trusted = self.trust_store.list_devices().await;
+                                            let _ = self.event_tx.send(ServiceEvent::TrustStoreUpdated(all_trusted));
+                                            break;
                                         }
                                         Ok(AppMessage::Disconnect { reason }) => {
                                             info!("Peer disconnected: {}", reason);
@@ -221,6 +269,57 @@ impl AppService {
                     }
                 }
             }
+            MSG_TYPE_PAIR_REQUEST => {
+                let req: PairRequestMessage = match serde_json::from_slice(&payload) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("Failed to parse PairRequestMessage from {}: {}", peer_addr, e);
+                        return;
+                    }
+                };
+                info!("Incoming pair request from {} ({})", req.from_device_name, req.from_device_id);
+
+                let (tx, rx) = tokio::sync::oneshot::channel::<Option<QrPairingPayload>>();
+                {
+                    let mut map = self.pending_pair_requests.write().await;
+                    map.insert(req.from_device_id.clone(), tx);
+                }
+
+                let _ = self.event_tx.send(ServiceEvent::IncomingPairRequest {
+                    from_device_id: req.from_device_id.clone(),
+                    from_device_name: req.from_device_name.clone(),
+                    from_fingerprint: req.from_fingerprint.clone(),
+                });
+
+                // Wait up to 60 seconds for the user to Allow or Deny in UI
+                let maybe_payload = match tokio::time::timeout(tokio::time::Duration::from_secs(60), rx).await {
+                    Ok(Ok(p)) => p,
+                    _ => None,
+                };
+
+                // Clean up pending map
+                {
+                    let mut map = self.pending_pair_requests.write().await;
+                    map.remove(&req.from_device_id);
+                }
+
+                let resp = match maybe_payload {
+                    Some(payload) => PairResponseMessage {
+                        accepted: true,
+                        code: Some(payload.code.clone()),
+                        qr_payload: Some(payload),
+                    },
+                    None => PairResponseMessage {
+                        accepted: false,
+                        code: None,
+                        qr_payload: None,
+                    },
+                };
+
+                if let Ok(resp_bytes) = serde_json::to_vec(&resp) {
+                    let _ = write_frame(&mut stream, MSG_TYPE_PAIR_RESPONSE, &resp_bytes).await;
+                }
+            }
             other => {
                 warn!(
                     "SECURITY DROP: Unknown frame type 0x{:02x} from {}. Dropped immediately.",
@@ -228,6 +327,66 @@ impl AppService {
                 );
             }
         }
+    }
+
+    pub async fn respond_pair_request(
+        &self,
+        from_device_id: &str,
+        accept: bool,
+    ) -> Result<Option<QrPairingPayload>, CoreError> {
+        let tx = {
+            let mut map = self.pending_pair_requests.write().await;
+            map.remove(from_device_id)
+        };
+
+        if accept {
+            let payload = self.start_pairing_mode().await?;
+            if let Some(tx) = tx {
+                let _ = tx.send(Some(payload.clone()));
+            }
+            Ok(Some(payload))
+        } else {
+            if let Some(tx) = tx {
+                let _ = tx.send(None);
+            }
+            Ok(None)
+        }
+    }
+
+    pub async fn send_pair_request(
+        &self,
+        peer_addr: &str,
+    ) -> Result<PairResponseMessage, CoreError> {
+        let mut stream = tokio::net::TcpStream::connect(peer_addr).await?;
+        let id = self.identity.read().await.clone();
+        let req = PairRequestMessage {
+            from_device_id: id.device_id,
+            from_device_name: id.device_name,
+            from_fingerprint: id.fingerprint,
+        };
+        let req_bytes = serde_json::to_vec(&req)
+            .map_err(|e| CoreError::Protocol(format!("Failed to serialize pair request: {}", e)))?;
+        write_frame(&mut stream, MSG_TYPE_PAIR_REQUEST, &req_bytes).await?;
+
+        let (msg_type, payload) = tokio::time::timeout(
+            tokio::time::Duration::from_secs(65),
+            read_frame(&mut stream),
+        )
+        .await
+        .map_err(|_| CoreError::Pairing("Timed out waiting for peer to respond to pairing request".to_string()))??;
+
+        if msg_type != MSG_TYPE_PAIR_RESPONSE {
+            return Err(CoreError::Protocol(format!("Expected pair response frame (0x04), got 0x{:02x}", msg_type)));
+        }
+
+        let resp: PairResponseMessage = serde_json::from_slice(&payload)
+            .map_err(|e| CoreError::Protocol(format!("Failed to parse pair response: {}", e)))?;
+
+        if !resp.accepted {
+            return Err(CoreError::Pairing("Pairing request was declined by the remote device".to_string()));
+        }
+
+        Ok(resp)
     }
 
     pub async fn get_identity(&self) -> IdentityDto {
@@ -368,6 +527,8 @@ impl AppService {
             peer: trusted.clone(),
             sas: sas.clone(),
         });
+        let all_trusted = self.trust_store.list_devices().await;
+        let _ = self.event_tx.send(ServiceEvent::TrustStoreUpdated(all_trusted));
 
         Ok((trusted, sas))
     }
@@ -403,10 +564,47 @@ impl AppService {
     }
 
     pub async fn revoke_trusted_device(&self, device_id: &str) -> Result<TrustedDevice, CoreError> {
+        let dev = self.trust_store.get_by_device_id(device_id).await;
+
         // Revoke from store
         let revoked = self.trust_store.revoke_device(device_id).await?;
         // Immediately drop any live sessions
         self.session.close_session(device_id).await;
+
+        // Notify local UI
+        let all_trusted = self.trust_store.list_devices().await;
+        let _ = self.event_tx.send(ServiceEvent::TrustStoreUpdated(all_trusted));
+
+        // Actively notify the peer device over LAN so it deletes us too!
+        if let Some(target) = dev {
+            let my_id = self.identity.read().await.device_id.clone();
+            let session_mgr = self.session.clone();
+            let discovery = self.discovery.clone();
+
+            tokio::spawn(async move {
+                let mut candidate_addrs = Vec::new();
+                for d in discovery.get_discovered_devices().await {
+                    if d.device_id == target.device_id {
+                        for ip in d.addresses {
+                            candidate_addrs.push(format!("{}:{}", ip, d.port));
+                        }
+                    }
+                }
+
+                for addr in candidate_addrs {
+                    if let Ok(stream) = tokio::net::TcpStream::connect(&addr).await {
+                        if let Ok(mut secure_session) = session_mgr.connect_to_peer(stream, &target).await {
+                            let _ = secure_session.send_app_message(&AppMessage::RevokeTrust {
+                                from_device_id: my_id.clone(),
+                            }).await;
+                            info!("Sent live RevokeTrust notification to peer at {}", addr);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(revoked)
     }
 }

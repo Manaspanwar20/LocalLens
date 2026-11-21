@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager, State};
 
 use localshare_core::discovery::DiscoveredDevice;
 use localshare_core::pairing::{PairingAuthMode, QrPairingPayload, SasConfirmation};
+use localshare_core::protocol::PairResponseMessage;
 use localshare_core::service::{AppService, IdentityDto};
 use localshare_core::trust::TrustedDevice;
 
@@ -98,6 +99,31 @@ async fn revoke_trusted_device(
 }
 
 #[tauri::command]
+async fn send_pair_request(
+    peer_addr: String,
+    state: State<'_, AppState>,
+) -> Result<PairResponseMessage, String> {
+    state
+        .service
+        .send_pair_request(&peer_addr)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn respond_pair_request(
+    from_device_id: String,
+    accept: bool,
+    state: State<'_, AppState>,
+) -> Result<Option<QrPairingPayload>, String> {
+    state
+        .service
+        .respond_pair_request(&from_device_id, accept)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn ping_peer(
     peer_addr: String,
     device_id: String,
@@ -112,17 +138,31 @@ async fn ping_peer(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    }
+
+    builder
         .setup(|app| {
             let handle = app.handle().clone();
+            // Obtain the sandboxed app data dir from Tauri
+            let data_dir = app.path().app_data_dir().ok();
 
             // Initialize tokio runtime for AppService
             tauri::async_runtime::block_on(async move {
-                let service = match AppService::init(None).await {
+                let service = match AppService::init(data_dir).await {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("Failed to init AppService: {}", e);
-                        panic!("Failed to init AppService: {}", e);
+                        // Fallback to in-memory/temp dir if storage failed
+                        match AppService::init(Some(std::env::temp_dir().join("localshare"))).await {
+                            Ok(s) => s,
+                            Err(e2) => panic!("Failed to init fallback AppService: {}", e2),
+                        }
                     }
                 };
 
@@ -162,6 +202,8 @@ pub fn run() {
             start_pairing,
             cancel_pairing,
             initiate_pairing,
+            send_pair_request,
+            respond_pair_request,
             list_trusted_devices,
             rename_trusted_device,
             revoke_trusted_device,

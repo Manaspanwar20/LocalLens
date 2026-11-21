@@ -4,6 +4,7 @@ import type {
   DiscoveredDevice,
   IdentityDto,
   PairingResult,
+  PairResponseMessage,
   QrPairingPayload,
   TrustedDevice,
 } from './types';
@@ -61,6 +62,41 @@ export async function cancelPairing(): Promise<void> {
   if (isTauri) {
     await invoke('cancel_pairing');
   }
+}
+
+export async function sendPairRequest(peerAddr: string): Promise<PairResponseMessage> {
+  if (isTauri) {
+    return await invoke<PairResponseMessage>('send_pair_request', { peerAddr });
+  }
+  return {
+    accepted: true,
+    code: '123456',
+  };
+}
+
+export async function respondPairRequest(
+  fromDeviceId: string,
+  accept: boolean
+): Promise<QrPairingPayload | null> {
+  if (isTauri) {
+    return await invoke<QrPairingPayload | null>('respond_pair_request', {
+      fromDeviceId,
+      accept,
+    });
+  }
+  if (accept) {
+    return {
+      version: 1,
+      device_id: 'mock-peer-device',
+      device_name: 'Mock Device',
+      fingerprint: 'abcd1234abcd1234',
+      addrs: ['192.168.1.100'],
+      port: 52480,
+      secret: 'mocksecret',
+      code: '654321',
+    };
+  }
+  return null;
 }
 
 export async function initiatePairing(

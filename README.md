@@ -1,4 +1,4 @@
-# LocalShare — Secure Local-First Device Discovery & Pairing
+# LocalLens - Secure cross-platform file access and sharing, searchable by what they contain
 
 > **Milestone 1**: Secure Device Discovery, Authenticated Pairing, and Encrypted Peer-to-Peer Sessions.
 

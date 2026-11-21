@@ -55,7 +55,7 @@ export const TrustedView: React.FC<TrustedViewProps> = ({
   };
 
   return (
-    <div style={{ maxWidth: '860px', margin: '0 auto', padding: '24px 20px' }}>
+    <div className="content-container" style={{ maxWidth: '860px', margin: '0 auto', padding: '24px 20px', width: '100%' }}>
       <div style={{
         display: 'flex',
         alignItems: 'center',

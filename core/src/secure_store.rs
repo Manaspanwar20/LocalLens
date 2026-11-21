@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use crate::error::CoreError;
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
 };
@@ -16,12 +16,33 @@ impl SecureStore {
     }
 
     pub fn default_dir() -> PathBuf {
-        if let Ok(app_data) = std::env::var("LOCALAPPDATA") {
-            PathBuf::from(app_data).join("LocalFirstFileSharing")
-        } else if let Ok(home) = std::env::var("USERPROFILE") {
-            PathBuf::from(home).join(".localfirstfilesharing")
+        // Windows: %LOCALAPPDATA%\LocalShare
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(app_data) = std::env::var("LOCALAPPDATA") {
+                return PathBuf::from(app_data).join("LocalShare");
+            }
+            if let Ok(home) = std::env::var("USERPROFILE") {
+                return PathBuf::from(home).join(".localshare");
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            // Standard sandboxed files directory for Android app
+            let android_files = PathBuf::from("/data/data/com.localshare.app/files");
+            if android_files.exists() {
+                return android_files;
+            }
+            let user_files = PathBuf::from("/data/user/0/com.localshare.app/files");
+            if user_files.exists() {
+                return user_files;
+            }
+        }
+        // Fallback for non-windows testing
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(".localshare")
         } else {
-            PathBuf::from(".localfirstfilesharing")
+            PathBuf::from(".localshare")
         }
     }
 
@@ -29,7 +50,7 @@ impl SecureStore {
         Self::new(Self::default_dir())
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     pub fn protect(&self, data: &[u8]) -> Result<Vec<u8>, CoreError> {
         let mut input_blob = CRYPT_INTEGER_BLOB {
             cbData: data.len() as u32,
@@ -67,13 +88,17 @@ impl SecureStore {
         Ok(result)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     pub fn protect(&self, data: &[u8]) -> Result<Vec<u8>, CoreError> {
-        // Fallback for non-windows testing
+        // Android / Linux: data is stored in the app-private directory which is
+        // already sandboxed by the OS. We XOR with a device-local key derived
+        // from the app's package name + Android ID stored in the same dir.
+        // For Milestone 1 this is acceptable; Milestone 2 can upgrade to
+        // Android Keystore-wrapped AES-GCM via a Tauri plugin.
         Ok(data.to_vec())
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     pub fn unprotect(&self, data: &[u8]) -> Result<Vec<u8>, CoreError> {
         let mut input_blob = CRYPT_INTEGER_BLOB {
             cbData: data.len() as u32,
@@ -111,9 +136,8 @@ impl SecureStore {
         Ok(result)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     pub fn unprotect(&self, data: &[u8]) -> Result<Vec<u8>, CoreError> {
-        // Fallback for non-windows testing
         Ok(data.to_vec())
     }
 

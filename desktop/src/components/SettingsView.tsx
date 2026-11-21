@@ -42,7 +42,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   return (
-    <div style={{ maxWidth: '720px', margin: '24px auto', padding: '0 20px' }}>
+    <div className="content-container" style={{ maxWidth: '720px', margin: '24px auto', padding: '0 20px', width: '100%' }}>
       <div style={{ marginBottom: '24px' }}>
         <h2 style={{ fontSize: '18px', fontWeight: 600 }}>Device Settings</h2>
         <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '2px' }}>
